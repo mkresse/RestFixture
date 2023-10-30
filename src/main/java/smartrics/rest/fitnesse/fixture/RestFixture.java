@@ -23,6 +23,9 @@ package smartrics.rest.fitnesse.fixture;
 import fitnesse.FitNesseVersion;
 import fitnesse.slim.StatementExecutorConsumer;
 import fitnesse.slim.StatementExecutorInterface;
+import org.awaitility.Awaitility;
+import org.awaitility.core.ConditionFactory;
+import org.awaitility.core.ConditionTimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import smartrics.rest.client.RestClient;
@@ -31,10 +34,15 @@ import smartrics.rest.client.RestMultipart;
 import smartrics.rest.client.RestRequest;
 import smartrics.rest.client.RestResponse;
 import smartrics.rest.fitnesse.fixture.support.*;
+import smartrics.rest.fitnesse.fixture.support.retry.RestRequestExecutor;
+import smartrics.rest.fitnesse.fixture.support.retry.RestResponsePreconditionPredicate;
+import smartrics.rest.fitnesse.fixture.support.retry.RetryFeedback;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * A fixture that allows to simply test REST APIs with minimal efforts. The core
@@ -251,6 +259,8 @@ public class RestFixture implements StatementExecutorConsumer, RunnerVariablesPr
 	protected Map<String,RestMultipart> multiFileNameByParamName = new LinkedHashMap<>();
 
 	protected String requestBody;
+	protected RestResponsePreconditionPredicate preconditionPredicate;
+	protected ConditionFactory awaitilityConditionFactory;
 
 	protected boolean resourceUrisAreEscaped = false;
 
@@ -937,6 +947,69 @@ public class RestFixture implements StatementExecutorConsumer, RunnerVariablesPr
 	}
 
 	/**
+	 * <code> | retryUntil | ?statusRegex | ?bodyRegex | </code>
+	 * <p>
+	 * Allows to define a precondition that needs to be satisfied before a rest response is accepted and used for
+	 * further processing. If a response does not satisfy the given condition, the request will be retried within
+	 * a configured poll interval. Retry will occur until either the condition satisfied, or a configured timeout
+	 * is reached.<br>
+	 * The condition consists of two optional regular expression patterns which have to match both, if defined.
+	 *
+	 * <ul>
+	 * <li><code>statusRegex</code> is a regular expression that is applied to the status code of the http response.
+	 * If this cell is empty, status code will be ignored.
+	 *
+	 * <li><code>bodyRegex</code> is a regular expression that is applied to the body of the http response.
+	 * If this cell is empty, body will be ignored.
+	 * </ul>
+	 */
+	public void retryUntil() {
+		debugMethodCallStart();
+
+		try {
+			CellWrapper statusPatternCell = row.getCell(1);
+			CellWrapper bodyPatternCell = row.getCell(2);
+			RetryFeedback retryFeedback = new RetryFeedback(statusPatternCell, bodyPatternCell, getFormatter());
+
+			Pattern statusPattern = getPattern(statusPatternCell);
+			Pattern bodyPattern = getPattern(bodyPatternCell);
+			preconditionPredicate = new RestResponsePreconditionPredicate(statusPattern, bodyPattern, retryFeedback);
+		} finally {
+			debugMethodCallEnd();
+		}
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	private Pattern getPattern(CellWrapper cell) {
+		String value = getValue(cell);
+		if (value != null) {
+			try {
+				return Pattern.compile(value);
+			} catch (Exception e) {
+				getFormatter().exception(cell, e);
+				LOG.error("Exception occurred while parsing regex in cell=" + cell, e);
+			}
+		}
+		return null;
+	}
+
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	private String getValue(CellWrapper cell) {
+		try {
+			if (cell != null) {
+				String cellBody = cell.body();
+				if (cellBody != null && !cellBody.trim().isEmpty()) {
+					return GLOBALS.substitute(cellBody.trim());
+				}
+			}
+		} catch (Exception e) {
+			getFormatter().exception(cell, e);
+			LOG.error("Exception occurred when fetching cell=" + cell, e);
+		}
+		return null;
+	}
+
+	/**
 	 * Evaluates a string using the internal JavaScript engine. Result of the
 	 * last evaluation is set in the attribute lastEvaluation.
 	 *
@@ -1008,6 +1081,7 @@ public class RestFixture implements StatementExecutorConsumer, RunnerVariablesPr
 		notifyInvalidState(state);
 		configFormatter();
 		configFixture();
+		configAwaitility();
 		configRestClient();
 	}
 
@@ -1117,8 +1191,26 @@ public class RestFixture implements StatementExecutorConsumer, RunnerVariablesPr
         configureCredentials();
 
 		restClient.setBaseUrl(thisRequestUrlParts[0]);
-		RestResponse response = restClient.execute(getLastRequest());
+
+		RestResponse response;
+		if (preconditionPredicate != null) {
+			response = executeUntilPredicateMatches();
+		} else {
+			response = restClient.execute(getLastRequest());
+		}
+
 		setLastResponse(response);
+	}
+
+	private RestResponse executeUntilPredicateMatches() {
+		RestRequestExecutor executor = new RestRequestExecutor(restClient, getLastRequest());
+		try {
+			return awaitilityConditionFactory.until(executor, preconditionPredicate);
+		} catch (ConditionTimeoutException e) {
+			LOG.info("Rest request didn't match condition", e);
+
+			return executor.getLastResponse();
+		}
 	}
 
 	@SuppressWarnings({ "rawtypes", "unchecked" })
@@ -1316,6 +1408,14 @@ public class RestFixture implements StatementExecutorConsumer, RunnerVariablesPr
 	 */
 	private void configRestClient() {
 		restClient = partsFactory.buildRestClient(getConfig());
+	}
+
+	protected void configAwaitility() {
+		awaitilityConditionFactory = Awaitility.await()
+			.pollDelay(config.getAsLong("restfixture.precondition.pollDelay", 0L), TimeUnit.MILLISECONDS)
+			.pollInterval(config.getAsLong("restfixture.precondition.pollInterval", 1000L), TimeUnit.MILLISECONDS)
+			.timeout(config.getAsLong("restfixture.precondition.timeout", 5000L), TimeUnit.MILLISECONDS)
+			.pollInSameThread();
 	}
 
 	@SuppressWarnings({ "rawtypes", "unchecked" })

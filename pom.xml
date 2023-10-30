@@ -58,12 +58,17 @@
         <dependency>
             <groupId>org.fitnesse</groupId>
             <artifactId>fitnesse</artifactId>
-            <version>20151230</version>
+            <version>20230503</version>
         </dependency>
         <dependency>
             <groupId>smartrics.restfixture</groupId>
             <artifactId>smartrics-RestClient</artifactId>
             <version>2.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <version>3.1.6</version>
         </dependency>
         <dependency>
             <groupId>org.mozilla</groupId>
@@ -102,6 +107,12 @@
             <artifactId>mockito-all</artifactId>
             <version>1.9.0</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.json</groupId>
+            <artifactId>json</artifactId>
+            <version>20230227</version>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
     <build>
